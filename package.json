@@ -1,17 +1,32 @@
 {
   "type": "module",
   "name": "worldcuphack",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "server": "tsx watch src/server.ts",
+    "server:once": "tsx src/server.ts",
+    "frontend": "npm --prefix src/oracle-room-frontend run dev",
+    "dev": "concurrently -n server,frontend -c blue,magenta \"npm:server\" \"npm:frontend\"",
+    "install:frontend": "npm --prefix src/oracle-room-frontend install",
+    "postinstall": "npm run install:frontend"
+  },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
     "axios": "^1.18.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "eventsource": "^4.1.0",
+    "express": "^4.21.2",
+    "tsx": "^4.23.1",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/node": "^26.1.1",
-    "tsx": "^4.23.1",
+    "concurrently": "^9.1.0",
     "typescript": "^7.0.2"
   }
 }

@@ -123,10 +123,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   padding: 0 8vw 90px;
 }
 .feature-strip article, .match-card, .room-card, .invite-card, .lobby-card, .match-header-card,
-.call-panel, .timeline-card, .room-panel, .prophecy-card, .awards-card, .summary-stat {
+.call-panel, .timeline-card, .room-panel, .prophecy-card, .awards-card, .summary-stat, .live-fixtures-card {
   border: 1px solid var(--line); background: linear-gradient(145deg, rgba(19,23,43,.93), rgba(8,11,25,.96));
   box-shadow: 0 18px 55px rgba(0,0,0,.18);
 }
+.live-fixtures-card { border-radius: 24px; padding: 22px; margin-top: 20px; }
+.live-fixtures-card .section-heading { margin-bottom: 12px; }
 .feature-strip article { padding: 24px; border-radius: 22px; }
 .feature-strip h3 { margin: 16px 0 8px; }
 .feature-strip p { margin: 0; color: var(--muted); line-height: 1.6; }

@@ -1,7 +1,19 @@
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  startGuestSession,
+  getFixtures,
+  subscribeToOddsStream,
+  subscribeToScoresStream,
+  type Fixture,
+  type ScoreEvent,
+} from "./lib/api";
+
+// TxODDS competition id used for the World Cup demo dataset (see
+// examples/subscription_free_tier.ts at the repo root).
+const WORLD_CUP_COMPETITION_ID = 72;
 
 type Screen = "landing" | "matches" | "rooms" | "lobby" | "live" | "collection" | "summary";
 type ProphecyType = "Goal" | "Penalty" | "VAR overturn" | "Red card";
@@ -57,6 +69,172 @@ export default function Home() {
   const [selectedReaction, setSelectedReaction] = useState<ReactionKey | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [collectionCount, setCollectionCount] = useState(3);
+
+  const [apiStatus, setApiStatus] = useState<"connecting" | "connected" | "error">("connecting");
+  const [liveFixtures, setLiveFixtures] = useState<Fixture[]>([]);
+  const [featuredFixture, setFeaturedFixture] = useState<Fixture | null>(null);
+  const [oddsStreamConnected, setOddsStreamConnected] = useState(false);
+  const [scoresStreamConnected, setScoresStreamConnected] = useState(false);
+
+  // Read from the effect below without forcing the SSE connections to
+  // reopen every time these values change mid-match.
+  const activeProphecyRef = useRef(activeProphecy);
+  activeProphecyRef.current = activeProphecy;
+  const minuteRef = useRef(minute);
+  minuteRef.current = minute;
+
+  // Establish the TxLINE guest session (via the local API proxy in
+  // src/server.ts) and pull the real World Cup fixture list once on load.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        await startGuestSession();
+        const fixtures = await getFixtures({ competitionId: WORLD_CUP_COMPETITION_ID });
+        if (cancelled) return;
+        setLiveFixtures(fixtures);
+
+        // Pick whichever World Cup fixture kicks off soonest (or is already
+        // live) as "the" match this session follows.
+        const now = Date.now();
+        const worldCupFixtures = fixtures
+          .filter((f) => f.CompetitionId === WORLD_CUP_COMPETITION_ID)
+          .sort((a, b) => a.StartTime - b.StartTime);
+        const featured =
+          worldCupFixtures.find((f) => f.StartTime >= now) ?? worldCupFixtures[worldCupFixtures.length - 1] ?? null;
+        setFeaturedFixture(featured);
+        setApiStatus("connected");
+      } catch (err) {
+        // Expected until the on-chain subscription flow has been run (see
+        // README) — TxLINE requires a paid API token for fixtures/odds, not
+        // just the guest session. console.warn avoids popping Next's dev
+        // error overlay for this already-handled fallback.
+        console.warn("Falling back to demo data — Oracle Room API unavailable:", err);
+        if (!cancelled) setApiStatus("error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // While watching live, mirror TxLINE's real odds stream into the timeline
+  // alongside the scripted demo events.
+  useEffect(() => {
+    if (screen !== "live" || apiStatus !== "connected" || !featuredFixture) return;
+
+    const source = subscribeToOddsStream(
+      (raw) => {
+        let parsed: { FixtureId?: number; Bookmaker?: string };
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          return; // non-JSON keep-alive payloads are expected on SSE streams
+        }
+        if (Number(parsed.FixtureId) !== featuredFixture.FixtureId) return;
+
+        setOddsStreamConnected(true);
+        setTimeline((items) => [
+          {
+            minute: minuteRef.current.split(":")[0] + "′",
+            icon: "📡",
+            title: "Live odds update",
+            detail: `${parsed.Bookmaker || "TxLINE"} via TxLINE`,
+            tone: "purple",
+          },
+          ...items,
+        ]);
+      },
+      () => setOddsStreamConnected(false)
+    );
+
+    return () => {
+      source.close();
+      setOddsStreamConnected(false);
+    };
+  }, [screen, apiStatus, featuredFixture]);
+
+  // Real goals/cards/period changes live on the scores feed, not odds. Track
+  // the running goal count per side and treat any increase as a real GOAL.
+  useEffect(() => {
+    if (screen !== "live" || apiStatus !== "connected" || !featuredFixture) return;
+
+    let knownP1Goals = 0;
+    let knownP2Goals = 0;
+    let knownGameState = "";
+
+    const source = subscribeToScoresStream(
+      (raw) => {
+        let event: ScoreEvent;
+        try {
+          event = JSON.parse(raw);
+        } catch {
+          return;
+        }
+        if (Number(event.FixtureId) !== featuredFixture.FixtureId) return;
+
+        setScoresStreamConnected(true);
+
+        if (event.GameState && event.GameState !== knownGameState) {
+          knownGameState = event.GameState;
+          setTimeline((items) => [
+            {
+              minute: minuteRef.current.split(":")[0] + "′",
+              icon: "📡",
+              title: `Match state: ${event.GameState}`,
+              detail: "Live from TxLINE scores feed",
+              tone: "purple",
+            },
+            ...items,
+          ]);
+        }
+
+        // Per TxODDS's soccer feed docs, stat key 1 = participant 1's total
+        // goals, key 2 = participant 2's total goals (no period prefix).
+        const p1Goals = Number(event.Stats?.["1"]);
+        const p2Goals = Number(event.Stats?.["2"]);
+        if (Number.isNaN(p1Goals) || Number.isNaN(p2Goals)) return;
+        if (p1Goals === knownP1Goals && p2Goals === knownP2Goals) return;
+
+        const scorer =
+          p1Goals > knownP1Goals
+            ? featuredFixture.Participant1
+            : p2Goals > knownP2Goals
+              ? featuredFixture.Participant2
+              : null;
+        knownP1Goals = p1Goals;
+        knownP2Goals = p2Goals;
+        setScore(`${p1Goals} — ${p2Goals}`);
+
+        if (scorer) {
+          setTimeline((items) => [
+            {
+              minute: minuteRef.current.split(":")[0] + "′",
+              icon: "⚽",
+              title: `GOAL — ${scorer}`,
+              detail: "Live from TxLINE scores feed",
+              tone: "green",
+            },
+            ...items,
+          ]);
+
+          if (activeProphecyRef.current?.type === "Goal") {
+            setActiveProphecy(null);
+            setCollectionCount((count) => count + 1);
+            window.setTimeout(() => setProphecyResultOpen(true), 400);
+          }
+        }
+      },
+      () => setScoresStreamConnected(false)
+    );
+
+    return () => {
+      source.close();
+      setScoresStreamConnected(false);
+    };
+  }, [screen, apiStatus, featuredFixture]);
 
   const route = (next: Screen) => {
     setScreen(next);
@@ -276,8 +454,48 @@ export default function Home() {
               <h2>Choose your match</h2>
               <p>Join the live conversation or replay a TxLINE match for the demo.</p>
             </div>
-            <div className="status-chip">● Replay data ready</div>
+            <div className="status-chip">
+              {apiStatus === "connected" && `● TxLINE connected · ${liveFixtures.length} fixtures`}
+              {apiStatus === "connecting" && "● Connecting to TxLINE…"}
+              {apiStatus === "error" && "● TxLINE offline · showing demo data"}
+            </div>
           </div>
+
+          {featuredFixture && (
+            <div className="match-grid" style={{ marginBottom: 20 }}>
+              <article className="match-card featured">
+                <div className="match-card-top">
+                  <span className="live-pill">● REAL · TXLINE</span>
+                  <span>{featuredFixture.Competition}</span>
+                </div>
+                <div className="teams">
+                  <div><strong>{featuredFixture.Participant1}</strong></div>
+                  <div className="score-block">
+                    <strong>vs</strong>
+                    <small>{new Date(featuredFixture.StartTime).toLocaleString(undefined, {
+                      weekday: "short",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}</small>
+                  </div>
+                  <div><strong>{featuredFixture.Participant2}</strong></div>
+                </div>
+                <div className="match-meta">
+                  <span>Fixture #{featuredFixture.FixtureId}</span>
+                  <span>Real odds + scores feed</span>
+                </div>
+                <button
+                  className="primary-button full"
+                  onClick={() => {
+                    setRoomName(`${featuredFixture.Participant1} vs ${featuredFixture.Participant2}`);
+                    route("rooms");
+                  }}
+                >
+                  Watch this real match
+                </button>
+              </article>
+            </div>
+          )}
 
           <div className="match-grid">
             <article className="match-card featured">
@@ -319,6 +537,24 @@ export default function Home() {
               </button>
             </article>
           </div>
+
+          {liveFixtures.length > 0 && (
+            <div className="live-fixtures-card">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">FROM TXLINE</span>
+                  <h3>Real fixtures available right now</h3>
+                </div>
+              </div>
+              <div className="match-meta" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
+                {liveFixtures.slice(0, 8).map((fixture) => (
+                  <span key={fixture.FixtureId}>
+                    {fixture.Participant1} vs {fixture.Participant2}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
       )}
 
@@ -504,7 +740,9 @@ export default function Home() {
               <section className="timeline-card">
                 <div className="card-title-row">
                   <div><span className="eyebrow">LIVE FEED</span><h3>Match timeline</h3></div>
-                  <span className="status-chip">● Synced</span>
+                  <span className="status-chip">
+                    {oddsStreamConnected || scoresStreamConnected ? "● TxLINE stream live" : "● Synced"}
+                  </span>
                 </div>
 
                 <div className="timeline-list">
