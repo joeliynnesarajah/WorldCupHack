@@ -1,6 +1,8 @@
 *.json
 !package.json
 !package-lock.json
+!tsconfig.json
+!src/idl/*.json
 .env
 .env.local
 **/id.json
